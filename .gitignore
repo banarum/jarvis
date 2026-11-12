@@ -1,0 +1,14 @@
+# runtime
+.venv/
+__pycache__/
+logs/
+logs.txt
+*.bak*
+.DS_Store
+
+# never commit secrets or personal state (they live in ~/.config/jarvis/)
+.env
+env
+token
+config.json
+memory.json

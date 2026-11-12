@@ -1,0 +1,11 @@
+{
+  "assistant_name": "Jarvis",
+  "user_name": "Alex",
+  "languages": ["en"],
+  "voice": "Charon",
+  "machines": ["local"],
+  "glossary": {
+    "my-app": "MyApp, the mobile app. Often mis-heard as 'my up'."
+  },
+  "persona": ""
+}

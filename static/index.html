@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0d0f12">
+<title>{{NAME}}</title>
+<style>
+  :root { --bg:#0d0f12; --fg:#e8eaed; --dim:#8a9099; --line:#1d2127; --accent:#3ddc97; --red:#ff5a5f; --you:#1b2a3a; --him:#16201b; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom); }
+  header { display:flex; justify-content:space-between; align-items:baseline; padding:16px 0 8px; }
+  h1 { margin:0; font-size:20px; font-weight:600; letter-spacing:.5px; }
+  #status { color:var(--dim); font-size:14px; }
+  #log { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:8px 0; }
+  .msg { padding:8px 12px; border-radius:14px; max-width:88%; white-space:pre-wrap; }
+  .you { background:var(--you); align-self:flex-end; }
+  .jarvis { background:var(--him); align-self:flex-start; }
+  .sys { color:var(--dim); font-size:13px; align-self:center; }
+  footer { display:flex; align-items:center; justify-content:center; gap:24px; padding:16px 0 24px; }
+  button { border:0; border-radius:50%; width:72px; height:72px; font-size:28px; color:#fff; cursor:pointer; }
+  #call { background:var(--accent); width:88px; height:88px; }
+  #call.on { background:var(--red); }
+  #mute { background:#2a2f37; display:none; }
+  #mute.muted { background:#5a3a3a; }
+  #meter { width:72px; height:6px; background:var(--line); border-radius:3px; overflow:hidden; display:none; }
+  #meter i { display:block; height:100%; width:0; background:var(--accent); transition:width 60ms; }
+  #meter.sending i { background:#ffd166; }
+  body.busy #status::after { content:' · working…'; color:var(--accent); }
+  #confirm { display:none; align-items:center; gap:12px; padding:12px; border-radius:14px; background:#22262d; }
+  #confirm.on { display:flex; }
+  #confirm span { flex:1; font-size:15px; }
+  #confirm button { width:52px; height:52px; font-size:22px; }
+  #yes { background:var(--accent); } #no { background:var(--red); }
+</style>
+</head>
+<body>
+<header><h1>{{NAME}}</h1><span id="status">offline</span></header>
+<div id="log"></div>
+<div id="confirm"><span></span><button id="yes" aria-label="Yes">✓</button><button id="no" aria-label="No">✕</button></div>
+<footer>
+  <div id="meter"><i></i></div>
+  <button id="call" aria-label="Call">📞</button>
+  <button id="mute" aria-label="Mute">🎙️</button>
+</footer>
+<script>
+const $ = s => document.querySelector(s);
+const logEl = $('#log'), statusEl = $('#status'), callBtn = $('#call'), muteBtn = $('#mute'),
+      meter = $('#meter'), meterBar = $('#meter i'), confirmEl = $('#confirm');
+const KEY = new URLSearchParams(location.search).get('k') || '';
+
+let ws, ctx, micStream, worklet, wakeLock;
+let muted = false, playing = [], playHead = 0, lastBubble = null;
+
+// --- transcript -----------------------------------------------------------
+function say(who, text) {
+  if (lastBubble && lastBubble.dataset.who === who) {
+    lastBubble.textContent += text;
+  } else {
+    lastBubble = document.createElement('div');
+    lastBubble.className = 'msg ' + who;
+    lastBubble.dataset.who = who;
+    lastBubble.textContent = text.trimStart();
+    logEl.appendChild(lastBubble);
+  }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function sys(text) { lastBubble = null; say('sys', text); lastBubble = null; }
+
+// --- playback (24 kHz PCM16 from Gemini) ----------------------------------
+function play(buf) {
+  const pcm = new Int16Array(buf);
+  const ab = ctx.createBuffer(1, pcm.length, 24000);
+  const ch = ab.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+  const src = ctx.createBufferSource();
+  src.buffer = ab;
+  src.connect(ctx.destination);
+  playHead = Math.max(playHead, ctx.currentTime + 0.03);
+  src.start(playHead);
+  playHead += ab.duration;
+  playing.push(src);
+  src.onended = () => { playing = playing.filter(s => s !== src); };
+}
+function stopPlayback() {
+  for (const s of playing) { try { s.stop(); } catch {} }
+  playing = []; playHead = 0;
+}
+
+// --- capture: resample to 16 kHz PCM16, 40 ms frames ---------------------
+const WORKLET = `
+class Cap extends AudioWorkletProcessor {
+  constructor() { super(); this.ratio = sampleRate / 16000; this.pos = 0; this.out = new Int16Array(640); this.n = 0; this.prev = 0; }
+  process([input]) {
+    const x = input[0];
+    if (!x) return true;
+    // linear interpolation between prev sample and the current block
+    while (this.pos < x.length) {
+      const i = Math.floor(this.pos), f = this.pos - i;
+      const a = i === 0 ? this.prev : x[i - 1], b = x[i];
+      const v = Math.max(-1, Math.min(1, a + (b - a) * f));
+      this.out[this.n++] = v * 32767;
+      if (this.n === this.out.length) { this.port.postMessage(this.out.buffer.slice(0)); this.n = 0; }
+      this.pos += this.ratio;
+    }
+    this.pos -= x.length; this.prev = x[x.length - 1];
+    return true;
+  }
+}
+registerProcessor('cap', Cap);`;
+
+// Only send audio while someone is speaking, so silence is not billed.
+// Pre-roll keeps the first syllable; hangover lets Gemini's VAD see the end.
+const PREROLL = 8, HANGOVER = 25;          // in 40 ms frames
+let noise = 0.005, quietFor = HANGOVER + 1, preroll = [];
+
+function onFrame(buf) {
+  if (muted || !ws || ws.readyState !== 1) return;
+  const pcm = new Int16Array(buf);
+  let sum = 0;
+  for (let i = 0; i < pcm.length; i++) sum += (pcm[i] / 32768) ** 2;
+  const rms = Math.sqrt(sum / pcm.length);
+  const loud = rms > Math.max(0.012, noise * 3);
+  if (!loud) noise = noise * 0.98 + rms * 0.02;
+  meterBar.style.width = Math.min(100, rms * 600) + '%';
+
+  if (loud) {
+    if (quietFor > HANGOVER) { for (const p of preroll) ws.send(p); preroll = []; }
+    quietFor = 0;
+  } else {
+    quietFor++;
+  }
+  if (quietFor <= HANGOVER) {
+    ws.send(buf);
+    meter.classList.add('sending');
+  } else {
+    if (quietFor === HANGOVER + 1) ws.send(JSON.stringify({ type: 'pause' }));
+    meter.classList.remove('sending');
+    preroll.push(buf); if (preroll.length > PREROLL) preroll.shift();
+  }
+}
+
+// --- "he is working" cue: a soft tick while tools run, instead of spoken filler
+let busy = 0, tickTimer = null;
+function tick() {
+  if (!ctx || playing.length) return;          // never tick over his voice
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.frequency.value = 880; o.type = 'sine';
+  g.gain.setValueAtTime(0.0001, ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.05, ctx.currentTime + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12);
+  o.connect(g).connect(ctx.destination);
+  o.start(); o.stop(ctx.currentTime + 0.14);
+}
+function working(d) {
+  busy = Math.max(0, busy + d);
+  document.body.classList.toggle('busy', busy > 0);
+  if (busy && !tickTimer) tickTimer = setTimeout(function loop() {   // first tick after 0.7 s: instant tools stay silent
+    if (!busy) { tickTimer = null; return; }
+    tick(); tickTimer = setTimeout(loop, 1100);
+  }, 700);
+}
+
+// --- call -----------------------------------------------------------------
+async function start() {
+  callBtn.disabled = true;
+  statusEl.textContent = 'connecting…';
+  try {
+    ctx = new AudioContext();
+    await ctx.resume();
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+    });
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' })));
+    worklet = new AudioWorkletNode(ctx, 'cap');
+    worklet.port.onmessage = e => onFrame(e.data);
+    ctx.createMediaStreamSource(micStream).connect(worklet);
+  } catch (e) {
+    sys('microphone: ' + e.message); hangup(); return;
+  }
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?k=${encodeURIComponent(KEY)}`);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = e => {
+    if (typeof e.data !== 'string') { play(e.data); return; }
+    const m = JSON.parse(e.data);
+    if (m.type === 'interrupted') stopPlayback();
+    else if (m.type === 'you' || m.type === 'jarvis') say(m.type, m.text);
+    else if (m.type === 'turn_complete') lastBubble = null;
+    else if (m.type === 'tool') { sys('🔎 ' + m.text); working(1); }
+    else if (m.type === 'tool_done') working(-1);
+    else if (m.type === 'status') statusEl.textContent = m.text;
+    else if (m.type === 'confirm') { confirmEl.querySelector('span').textContent = m.text; confirmEl.classList.add('on'); }
+    else if (m.type === 'confirm_done') confirmEl.classList.remove('on');
+    else if (m.type === 'error') sys('error: ' + m.text);
+  };
+  ws.onclose = () => { sys('call ended'); hangup(); };
+  callBtn.classList.add('on'); callBtn.textContent = '✕'; callBtn.disabled = false;
+  muteBtn.style.display = meter.style.display = 'block';
+}
+
+function hangup() {
+  const w = ws; ws = null;
+  if (w && w.readyState <= 1) w.close();
+  stopPlayback();
+  micStream?.getTracks().forEach(t => t.stop());
+  worklet?.disconnect();
+  ctx?.close();
+  wakeLock?.release?.();
+  ctx = micStream = worklet = wakeLock = null;
+  quietFor = HANGOVER + 1; preroll = []; busy = 0; document.body.classList.remove('busy');
+  callBtn.classList.remove('on'); callBtn.textContent = '📞'; callBtn.disabled = false;
+  muteBtn.style.display = meter.style.display = 'none';
+  statusEl.textContent = 'offline';
+  confirmEl.classList.remove('on');
+}
+
+callBtn.onclick = () => (ws ? hangup() : start());
+for (const [id, ok] of [['#yes', true], ['#no', false]]) $(id).onclick = () => {
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'confirm', ok }));
+  confirmEl.classList.remove('on');
+};
+muteBtn.onclick = () => {
+  muted = !muted;
+  muteBtn.classList.toggle('muted', muted);
+  muteBtn.textContent = muted ? '🔇' : '🎙️';
+  if (muted && ws?.readyState === 1) ws.send(JSON.stringify({ type: 'pause' }));
+};
+</script>
+</body>
+</html>
