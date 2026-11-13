@@ -37,7 +37,6 @@ secrets and what is still missing: [TELEGRAM.md](TELEGRAM.md). History and open 
   stalls (`JARVIS_BACKUP_MODEL`).
 - **local**: Whisper on this Mac (`pip install mlx-whisper`) transcribes, the same text
   model thinks, macOS `say` speaks.
-- **gemini**: Gemini Live listens, thinks and speaks. Kept in the code, not recommended.
 
 Everything personal lives in `~/.config/jarvis/`, never in the repo. Every model call is
 priced into `logs/usage.jsonl`.

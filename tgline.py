@@ -49,7 +49,7 @@ def load_tg():
     cfg = {
         "whitelist": [],          # user ids that may call and message; nobody else is answered
         "work_chat": None,        # chat id, @username or invite link of the chat to listen to
-        "pipeline": server.PIPELINE,   # speak | local | gemini (see TELEGRAM.md)
+        "pipeline": server.PIPELINE,   # speak | local (see TELEGRAM.md)
         "smart_turn": True,       # a model judges whether the caller has finished (turn.py); off = silence timer only
         "turn_threshold": 0.6,    # how sure it must be to end the phrase early
         "hangover_max_ms": 2500,  # with the model: silence that ends a phrase it thinks is unfinished
@@ -312,8 +312,6 @@ class Line:
 
 
 def call_class(mode):
-    if mode == "gemini":
-        return server.Call
     cls = server.local_call(mode)
     if not cls:
         raise SystemExit(f"the {mode} pipeline is not set up: it needs mlx-whisper and JARVIS_BRAIN_KEY (see README)")
@@ -326,9 +324,9 @@ def call_class(mode):
     return phone.phone(cls)
 
 
-def gemini():
+def speech_client():
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not key and TG["pipeline"] != "local":
+    if not key and TG["pipeline"] != "local":   # the speak pipeline's ears and voice
         raise SystemExit(f"No GEMINI_API_KEY: put GEMINI_API_KEY=... into {CONF_DIR / 'env'}")
     return genai.Client(api_key=key, http_options={"api_version": "v1beta"}) if key else None
 
@@ -336,11 +334,7 @@ def gemini():
 async def run_call(line, client):
     player = asyncio.create_task(line.play())
     try:
-        call = call_class(TG["pipeline"])(line, client)
-        await call.run()
-        if call.fallback and server.local_call():   # Gemini refused over billing
-            line.closed = False
-            await call_class("local")(line, client).run()
+        await call_class(TG["pipeline"])(line, client).run()
     finally:
         await line.close()
         player.cancel()
@@ -418,7 +412,7 @@ class Phone:
             raise SystemExit(f"The whitelist is empty: put user ids into \"whitelist\" in {TG_CONF}")
         self.tg = telegram_client()
         self.calls = PyTgCalls(self.tg)
-        self.client = gemini()
+        self.client = speech_client()
         self.line = None          # the live call, one at a time
         self.peer = None
         self.work_chat = None
@@ -475,14 +469,13 @@ class Phone:
             asyncio.get_running_loop().run_in_executor(local.EARS, local.transcribe, bytes(32000))
         if TG["smart_turn"]:
             await asyncio.get_running_loop().run_in_executor(None, turn.load)
-        if TG["pipeline"] != "gemini":   # have the greeting and "one second" ready before the first call
-            try:
-                import phone
-                warm = call_class(TG["pipeline"])(Line(None), self.client)
-                await asyncio.gather(*(warm.warm(x) for x in (phone.GREETING, phone.FILLER, *phone.FILLERS.values())))
-                warm.logf.close()
-            except Exception as e:
-                log.warning("could not prepare the greeting: %s", e)
+        try:                             # have the greeting and "one second" ready before the first call
+            import phone
+            warm = call_class(TG["pipeline"])(Line(None), self.client)
+            await asyncio.gather(*(warm.warm(x) for x in (phone.GREETING, phone.FILLER, *phone.FILLERS.values())))
+            warm.logf.close()
+        except Exception as e:
+            log.warning("could not prepare the greeting: %s", e)
         me = await self.tg.get_me()
         log.info("on the line as %s (id %s), pipeline %s, %d whitelisted, work chat %s",
                  me.first_name, me.id, TG["pipeline"], len(TG["whitelist"]), self.work_chat)
@@ -634,7 +627,7 @@ async def selftest(question):
     if TG["pipeline"] == "local":                # as the real run does: Whisper is loaded before the call
         import local
         await asyncio.get_running_loop().run_in_executor(local.EARS, local.transcribe, bytes(32000))
-    call = asyncio.create_task(run_call(line, gemini()))
+    call = asyncio.create_task(run_call(line, speech_client()))
 
     async def quiet_for(seconds, limit):
         """Wait until the assistant has said nothing for a while."""

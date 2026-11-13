@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 
 from aiohttp import WSMsgType
-from google.genai import types
 
 ROOT = Path(__file__).parent
 CONF_DIR = Path.home() / ".config" / "jarvis"
@@ -32,21 +31,12 @@ if (CONF_DIR / "env").exists():
         if _sep and not _k.startswith("#"):
             os.environ.setdefault(_k.strip(), _v.strip().strip('"'))
 
-MODEL = os.environ.get("JARVIS_MODEL", "gemini-3.8-live")
-# The call's context is re-read on every turn, so it is kept short: once it
-# passes this many tokens the oldest turns are dropped down to half of it.
-CONTEXT_TOKENS = int(os.environ.get("JARVIS_CONTEXT_TOKENS", "25600"))
 # USD per million tokens (input, output), for the spend log only.
-PRICES = {"live": {"TEXT": (0.75, 4.5), "AUDIO": (3.0, 12.0)},     # Gemini Live
-          "ears": {"TEXT": (3.5, 21.0), "AUDIO": (3.5, 21.0)},     # live transcription
+PRICES = {"ears": {"TEXT": (3.5, 21.0), "AUDIO": (3.5, 21.0)},     # live transcription
           "mouth": {"TEXT": (0.5, 9.0), "AUDIO": (0.5, 9.0)}}      # speech synthesis
-# Which pipeline a call starts on: "gemini" (Gemini Live does everything) or
-# "local" (local.py: Whisper on this machine -> a text model -> speech) or
-# "speak" (local.py: Gemini transcribes and speaks, the text model thinks). The
-# page can switch per call, and a call falls back to local by itself when
-# Gemini refuses it over billing.
-PIPELINE = os.environ.get("JARVIS_PIPELINE", "gemini")
-THINKING = os.environ.get("JARVIS_THINKING", "low")
+# Which pipeline a call runs on, both in local.py: "speak" (cloud transcription and
+# speech, a text model thinks) or "local" (Whisper on this machine and the system voice).
+PIPELINE = os.environ.get("JARVIS_PIPELINE", "speak")
 
 log = logging.getLogger("jarvis")
 
@@ -218,7 +208,6 @@ agent (or several) that would know, ask a precise question and ask for a \
 short answer, verdict first. Say in a few words that you asked; the reply \
 arrives as a "(System: ...)" message. Prefer an agent that is idle or done: \
 a working one only answers after its current step.
-- google_search: quick facts from the web, answer right away.
 - research: background web researcher for questions that need digging. Say \
 it's running and carry on; the result arrives as a "(System: ...)" message.
 
@@ -298,7 +287,6 @@ TOOLS = [
         fn("quiet", "Turn unprompted announcements about agents off or on.",
            on={"type": "BOOLEAN", "description": "true = stay quiet"}),
     ]},
-    {"google_search": {}},
 ]
 
 # Web research runs in its own folder whose opencode.json denies bash, edits
@@ -494,16 +482,13 @@ async def last_answer(id):
 # --- one phone call ----------------------------------------------------------
 
 class Call:
-    fallback = False              # set when the call should carry on in the local pipeline
 
     def __init__(self, ws, client):
         self.ws = ws
         self.client = client
         self.session = None
-        self.handle = None
         self.closed = False
         self.started = time.time()
-        self.usd = 0.0            # what the live model cost this call
         self.pending = None       # answer_prompt waiting for a yes
         self.confirm_lock = asyncio.Lock()
         self.heard = []           # (time, text) of user transcription
@@ -527,23 +512,6 @@ class Call:
         if not self.ws.closed:
             await self.ws.send_json(msg)
 
-    def config(self):
-        vocabulary = sorted({CFG["assistant_name"], *CFG["glossary"], *(a["project"] for a in AGENTS.values())} - {""})
-        return types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            # the extended-thinking model refuses to start without a level
-            thinking_config=types.ThinkingConfig(thinking_level=THINKING) if "thinking" in MODEL else None,
-            system_instruction=system_prompt() + "\n\nYour notes from earlier calls:\n" + self.notes(),
-            tools=TOOLS,
-            speech_config={"voice_config": {"prebuilt_voice_config": {"voice_name": CFG["voice"]}}},
-            input_audio_transcription=types.AudioTranscriptionConfig(
-                language_codes=CFG["languages"], custom_vocabulary=vocabulary[:100]),
-            output_audio_transcription={},
-            context_window_compression=types.ContextWindowCompressionConfig(
-                trigger_tokens=CONTEXT_TOKENS, sliding_window=types.SlidingWindow(target_tokens=CONTEXT_TOKENS // 2)),
-            session_resumption=types.SessionResumptionConfig(handle=self.handle),
-        )
-
     def notes(self):
         return "\n".join(f"- {n}" for n in self.memory["notes"][-60:]) or "- none yet"
 
@@ -555,10 +523,6 @@ class Call:
             parts.append("Files waiting in your queue:\n" + json.dumps(file_queue(), ensure_ascii=False))
         return "\n\n".join(parts) + ")"
 
-    async def say(self, s, text, turn_complete=True):
-        await s.send_client_content(
-            turns=types.Content(role="user", parts=[types.Part(text=text)]), turn_complete=turn_complete)
-
     async def open_call(self, s):
         await refresh_stale(5)
         await self.say(s, self.briefing(), turn_complete=False)
@@ -568,91 +532,6 @@ class Call:
             self.last_system_at = time.time()
             await self.say(s, "(System: the call just connected. Open with one short line: a hello, plus "
                               "whatever on the board needs attention right now, if anything does. No lists.)")
-
-    async def run(self):
-        for old in list(CALLS):  # a new call replaces a page left open elsewhere
-            old.closed = True
-            await old.ws.close()
-        CALLS.add(self)
-        reader = asyncio.create_task(self.read_browser())
-        try:
-            first = True
-            # Connections live ~10 minutes; on GoAway we reconnect with the
-            # resumption handle and the conversation carries on.
-            while not self.closed:
-                try:
-                    async with self.client.aio.live.connect(model=MODEL, config=self.config()) as s:
-                        self.session = s
-                        self.log("connected", resumed=not first)
-                        await self.to_browser(type="status", text="connected")
-                        await self.to_browser(type="mode", mode="gemini")
-                        if first:
-                            first = False
-                            asyncio.create_task(self.open_call(s))
-                        await self.pump(s)
-                except Exception as e:
-                    if self.closed:
-                        break
-                    log.exception("live session error")
-                    self.log("error", error=str(e))
-                    if re.search(r"credit|billing|quota|exhausted", str(e), re.I) and local_call():
-                        self.fallback = True
-                        break
-                    if not self.handle:
-                        await self.to_browser(type="error", text=str(e)[:300])
-                        break
-                    await self.to_browser(type="status", text="reconnecting…")
-                    await asyncio.sleep(1)
-                finally:
-                    self.session = None
-        finally:
-            self.closed = True
-            CALLS.discard(self)
-            reader.cancel()
-            self.log("hangup", seconds=round(time.time() - self.started), live_usd=round(self.usd, 3))
-            if not self.ws.closed and not self.fallback:
-                await self.ws.close()
-            self.logf.close()
-
-    async def pump(self, s):
-        # session.receive() stops at each turn_complete, so keep re-entering it.
-        while not self.closed:
-            async for r in s.receive():
-                if r.session_resumption_update:
-                    u = r.session_resumption_update
-                    if u.resumable and u.new_handle:
-                        self.handle = u.new_handle
-                if r.usage_metadata:
-                    self.usd += spend("live", r.usage_metadata)
-                if r.go_away is not None:
-                    self.log("go_away")
-                    return
-                if r.tool_call:
-                    for fc in r.tool_call.function_calls:
-                        asyncio.create_task(self.run_tool(s, fc))
-                sc = r.server_content
-                if not sc:
-                    continue
-                if sc.interrupted:
-                    await self.to_browser(type="interrupted")
-                if sc.model_turn:
-                    for part in sc.model_turn.parts or []:
-                        if part.inline_data and part.inline_data.data and not self.ws.closed:
-                            self.last_out = time.time()
-                            await self.ws.send_bytes(part.inline_data.data)
-                if sc.input_transcription and sc.input_transcription.text:
-                    text = sc.input_transcription.text
-                    self.last_user_at = time.time()
-                    self.heard.append((self.last_user_at, text))
-                    del self.heard[:-50]
-                    await self.to_browser(type="you", text=text)
-                    self.log("you", text=text)
-                if sc.output_transcription and sc.output_transcription.text:
-                    text = sc.output_transcription.text
-                    await self.to_browser(type="jarvis", text=text)
-                    self.log("jarvis", text=text)
-                if sc.turn_complete:
-                    await self.to_browser(type="turn_complete")
 
     async def call_tool(self, name, args):
         await self.to_browser(type="tool", text=name + (f" {args['id']}" if "id" in args else ""))
@@ -668,16 +547,6 @@ class Call:
         if FILES:
             await self.to_browser(type="files", files=file_queue())
         return result
-
-    async def run_tool(self, s, fc):
-        result = await self.call_tool(fc.name, dict(fc.args or {}))
-        try:
-            await s.send_tool_response(function_responses=[types.FunctionResponse(
-                id=fc.id, name=fc.name, response=result,
-                scheduling=types.FunctionResponseScheduling.WHEN_IDLE,
-            )])
-        except Exception:
-            log.exception("tool response failed")
 
     def user_asked(self):
         """Actions on agents must follow the user's own speech, not a system
@@ -941,40 +810,6 @@ class Call:
         self.log("notify", text=text)
         self.last_system_at = time.time()
         await self.say(self.session, text)
-
-    # --- browser ---
-
-    async def stall_check(self, since):
-        await asyncio.sleep(10)
-        if not self.closed and self.last_out < since and self.last_in <= since:
-            self.log("stall", note="caller stopped talking, no reply in 10s")
-
-    async def read_browser(self):
-        async for msg in self.ws:
-            s = self.session
-            if msg.type == WSMsgType.BINARY:
-                now = time.time()
-                if now - self.last_in > 1.5:
-                    self.log("speech_start")
-                self.last_in = now
-                if s:
-                    await s.send_realtime_input(audio=types.Blob(data=msg.data, mime_type="audio/pcm;rate=16000"))
-            elif msg.type == WSMsgType.TEXT:
-                m = json.loads(msg.data)
-                if m.get("type") == "confirm":
-                    asyncio.create_task(self.tapped(bool(m.get("ok"))))
-                elif not s:
-                    continue
-                elif m.get("type") == "pause":
-                    # Browser stopped sending silence; tell the server VAD to flush.
-                    await s.send_realtime_input(audio_stream_end=True)
-                    asyncio.create_task(self.stall_check(time.time()))
-                elif m.get("type") == "text" and m.get("text"):
-                    self.last_user_at = time.time()
-                    self.heard.append((self.last_user_at, m["text"]))
-                    await s.send_realtime_input(text=m["text"])
-        self.closed = True
-
 
 def local_call(mode="local"):
     """The call class of a local.py pipeline, or None when it isn't set up here."""

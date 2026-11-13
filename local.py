@@ -133,7 +133,7 @@ synthesiser. So reply with speech only: no markdown, no lists, no emoji, \
 numbers and abbreviations the way they are said. The transcript can be \
 mangled: trust the meaning, not the spelling. If it is clearly noise or not \
 addressed to you, reply with exactly: ... (three dots) and nothing is said. \
-There is no google_search here; use research for anything from the web.
+Use research for anything from the web.
 
 Your notes from earlier calls:
 {notes}"""

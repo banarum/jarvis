@@ -38,6 +38,8 @@ Jarvis is now reached by calling a Telegram account. The browser call page is go
 - `README.md` rewritten for the Telegram line.
 
 ### Removed
+- The Gemini Live pipeline, where one model listened, thought and spoke, and its web-search
+  tool. Gemini is now used for transcription and speech only; a text model does the thinking.
 - The browser call page: `static/`, `run.sh`, the HTTP server, the upload endpoint and the
   page token.
 

@@ -168,3 +168,6 @@ that cannot be trusted.
   `static/`, `run.sh`, the HTTP server, upload endpoint and page token in `server.py`, the
   Tailscale link to it. `server.py` stays as the core (call classes, tools, agent monitor).
   A copy of the removed files and of the uncommitted page edits is kept outside the repo.
+- 2026-11-13 (20:40) — The Gemini Live pipeline is deleted from the code (`server.py`): no
+  model does listening, thinking and speaking in one any more. Pipelines left: `speak`
+  (default) and `local`. Gemini remains only as the transcriber and the voice of `speak`.

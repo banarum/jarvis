@@ -10,7 +10,7 @@ caller ⇄ Telegram call (py-tgcalls / ntgcalls, Telethon session)
            ⇅ 48 kHz PCM, 10 ms frames
          Line: resample, VAD / turn-taking, barge-in, latency timer
            ⇅ frames and pauses, the interface the call classes expect
-         server.Call (gemini) | local.SpeakCall (speak) | local.LocalCall (local)
+         local.SpeakCall (speak) | local.LocalCall (local), wrapped by phone.py
 ```
 
 ## Setup
@@ -35,7 +35,7 @@ caller ⇄ Telegram call (py-tgcalls / ntgcalls, Telethon session)
    - `whitelist`: numeric user ids allowed to call and message. Empty = refuses to start.
    - `work_chat`: chat id, `@username` or invite link. `tgline.py chats` lists ids.
      With an invite link or a public username the account joins by itself.
-   - `pipeline`: `gemini`, `speak` or `local` (default: `JARVIS_PIPELINE`).
+   - `pipeline`: `speak` or `local` (default: `JARVIS_PIPELINE`, `speak`).
    - `speed`: speech rate of the `speak`/`local` pipelines on this line only (1.0 = the voice's
      own pace); without it `config.json`'s `speed` applies. The `gemini` pipeline has no rate control.
    - `hangover_ms`: silence that ends the caller's phrase (lower = snappier, more cut-offs).
@@ -137,7 +137,6 @@ which is not measured yet.
 
 | pipeline | answer starts after |
 |---|---|
-| gemini (Gemini Live) | ~0.5 s |
 | speak (Gemini ears/mouth, text brain) | ~2.5 s (first words of the answer; ~5.5 s when a tool is needed, with "one second" at ~2 s) |
 | local (Whisper, text brain, macOS `say`) | ~4.1 s |
 

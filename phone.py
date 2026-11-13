@@ -107,7 +107,7 @@ async def stream_chat(messages, tools, on_text, on_tool, backup=False):
     """local.chat, but streamed: text is handed over as it is written."""
     url, key, model, extra = (BACKUP["url"], BACKUP["key"], BACKUP["model"], {}) if backup else \
         (local.BRAIN_URL, local.BRAIN_KEY, local.BRAIN_MODEL, EXTRA)
-    body = {"model": model, "messages": flat(messages) if "gemini" in model else messages, "tools": tools, "stream": True,
+    body = {"model": model, "messages": messages, "tools": tools, "stream": True,
             "stream_options": {"include_usage": True}, **extra}
     content, calls, usage = "", {}, {}
     # sock_read: a provider that goes quiet mid-reply is given up on after STALL seconds, not three minutes
@@ -183,23 +183,6 @@ server.Call.tool_ledger = tool_ledger
 server.TOOLS[0]["function_declarations"].append(server.fn(
     "ledger", "Your own record of what you asked agents on these calls: what is still awaited, and the recent "
               "answers. Use it for 'what are we waiting for' and before asking an agent something again."))
-
-
-def flat(msgs):
-    """The same conversation without tool-call structure, for a model that did not make those calls
-    (Gemini refuses function calls it has not signed): results become system notes."""
-    names = {c["id"]: c["function"]["name"] for m in msgs for c in m.get("tool_calls") or []}
-    out = []
-    for m in msgs:
-        if m["role"] == "tool":
-            out.append({"role": "user", "content": f"(System: the {names.get(m.get('tool_call_id'), 'tool')} tool returned: "
-                                                   f"{str(m.get('content'))[:3000]})"})
-        elif m.get("tool_calls"):
-            if m.get("content"):
-                out.append({"role": "assistant", "content": m["content"]})
-        else:
-            out.append(m)
-    return out
 
 
 def canonical(text):
