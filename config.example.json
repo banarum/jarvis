@@ -3,6 +3,8 @@
   "user_name": "Alex",
   "languages": ["en"],
   "voice": "Charon",
+  "speed": 1.0,
+  "loudness": -16,
   "machines": ["local"],
   "glossary": {
     "my-app": "MyApp, the mobile app. Often mis-heard as 'my up'."

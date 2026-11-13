@@ -1,0 +1,5 @@
+py-tgcalls==3.0.0
+telethon==1.45.0
+numpy
+onnxruntime==1.23.2
+transformers==5.20.2
