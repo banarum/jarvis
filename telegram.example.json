@@ -1,0 +1,10 @@
+{
+  "whitelist": [
+    111111111
+  ],
+  "work_chat": -1001234567890,
+  "pipeline": "gemini",
+  "hangover_ms": 800,
+  "max_file_mb": 50,
+  "speed": 1.0
+}

@@ -1,79 +1,52 @@
 # Jarvis
 
-A phone-call style voice line to the coding agents (Claude Code, opencode) you run in
-[herdr](https://herdr.dev). Call it from your phone, ask what the agents are doing, tell
-them what to do next, approve their prompts — without looking at a screen.
+A phone line to the coding agents (Claude Code, opencode) you run in
+[herdr](https://herdr.dev). Call a Telegram account from your phone, ask what the agents
+are doing, tell them what to do next, approve their prompts — without looking at a screen.
 
-It is a small aiohttp server that bridges a browser microphone to the Gemini Live API
-and gives the model tools that drive the `herdr` CLI.
+`tgline.py` logs into Telegram as a dedicated user account and answers voice calls from
+whitelisted users. The caller's speech is transcribed, a text model with tools that drive
+the `herdr` CLI decides what to do, and the answer is spoken back. Setup, configuration,
+secrets and what is still missing: [TELEGRAM.md](TELEGRAM.md). History and open problems:
+[STATUS.md](STATUS.md).
 
 ## What it can do
 
 - **Look**: list agents by project, read an agent's screen, answer questions from a whole
   session or a whole project.
-- **Act**: message an agent, run a multi-round "find out and report" job, start a new
-  agent in a project, answer approval dialogs (the only action that needs a spoken or
-  tapped yes).
-- **Search**: Google Search for quick facts, and a sandboxed opencode researcher for
-  questions that need digging.
+- **Act**: message an agent (changes to a product wait for a spoken yes), start a new agent
+  in a project, answer approval dialogs, keep a ledger of what was asked and what came back.
+- **Search**: a sandboxed opencode researcher for questions that need the web.
 - **Tell you things**: agents that finish or get blocked are mentioned in pauses.
-- **Remember**: the model keeps its own notes between calls.
+- **Remember**: one conversation carried across calls, plus notes the model keeps for itself.
+- **Files**: photos and documents sent to the account, or posted in its work chat, land in
+  a queue the assistant can hand to agents.
 
 ## Requirements
 
 - macOS or Linux with `herdr` installed and agents running in it
-- Python 3.10+
-- A Gemini API key with access to the Live API
+- Python 3.10+, `ffmpeg`
+- A Telegram account for the line, and API credentials from my.telegram.org
+- A Gemini API key (speech in and out only) and a key for an OpenAI-compatible text model
 - `opencode` on `PATH` (only for the `research` tool)
 
-## Setup
+## Pipelines
 
-```sh
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+- **speak** (the one in use): Gemini transcribes and speaks, a text model thinks
+  (`JARVIS_BRAIN_KEY`, `JARVIS_BRAIN_MODEL`, `JARVIS_BRAIN_URL`), with a backup model when it
+  stalls (`JARVIS_BACKUP_MODEL`).
+- **local**: Whisper on this Mac (`pip install mlx-whisper`) transcribes, the same text
+  model thinks, macOS `say` speaks.
 
-mkdir -p ~/.config/jarvis
-echo 'GEMINI_API_KEY=your-key' > ~/.config/jarvis/env
-chmod 600 ~/.config/jarvis/env
-cp config.example.json ~/.config/jarvis/config.json   # then edit it
-
-./run.sh
-```
-
-The server listens on `127.0.0.1:8765` and logs a URL containing an access token
-(generated once into `~/.config/jarvis/token`). Open that URL in a browser, press the
-call button and talk. Use headphones, or the assistant will hear itself.
-
-### From a phone
-
-Browsers only allow the microphone over HTTPS. The simplest private way is Tailscale:
-
-```sh
-tailscale serve --bg 8765
-```
-
-Then open `https://<your-machine>.<tailnet>.ts.net/?k=<token>` on the phone. Do not
-expose the port to the public internet: whoever has the URL can message your agents.
-
-## Configuration
-
-Everything personal lives in `~/.config/jarvis/`, never in the repo:
-
-| File | What |
-|---|---|
-| `env` | `GEMINI_API_KEY` |
-| `token` | access token for the page URL |
-| `config.json` | your name, the assistant's name, languages, voice, herdr machines, project glossary |
-| `memory.json` | notes the assistant saved for itself |
-
-Environment overrides: `JARVIS_MODEL`, `JARVIS_DEEP_MODEL`, `JARVIS_THINKING`, `JARVIS_PORT`.
+Everything personal lives in `~/.config/jarvis/`, never in the repo. Every model call is
+priced into `logs/usage.jsonl`.
 
 ## Safety notes
 
 - Agent output, session transcripts and web pages go into the model's context. The prompt
-  tells it to treat them as data, and the server only lets it message an agent right
-  after the caller's own speech, but this is mitigation, not a guarantee. Only list
-  machines in `machines` whose agents you trust.
+  tells it to treat them as data, and actions on agents are only allowed right after the
+  caller's own speech, but this is mitigation, not a guarantee. Only list machines in
+  `machines` whose agents you trust.
 - The researcher runs in `research/`, whose `opencode.json` denies shell, edits and
   access outside that folder.
-- Call logs (`logs/`) contain transcripts of what you and your agents said.
+- `logs/` contains transcripts and recordings of what the caller said.

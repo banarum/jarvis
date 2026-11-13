@@ -12,3 +12,10 @@ env
 token
 config.json
 memory.json
+uploads/
+
+# telegram line (tgline.py): the session file is a full login to the account
+*.session
+*.session-journal
+telegram.json
+telegram-chat.jsonl
