@@ -112,10 +112,9 @@ call the page's one-phrase-at-a-time loop drifts out of step with the caller:
   an interruption, "угу" or nothing lets him carry on where he stopped two seconds later;
 - his history keeps only the sentences the caller heard to the end; a reply that was cut
   off is marked so, and he does not assume the rest is known (Pipecat's rule);
-- if the brain goes quiet for 5 s the turn is retried on a backup model
-  (`JARVIS_BACKUP_MODEL`, default `gpt-5.4-mini` on the same gateway; Gemini is used for
-  audio only, never for thinking),
-  which is then used for 90 s;
+- if the brain has not said a word after 2.5 s, the same question is asked a second time and
+  whichever request speaks first is the reply (by default the same model again;
+  `JARVIS_BACKUP_MODEL` names another one on the same gateway);
 - the reply is streamed and spoken from its first finished sentence; "one second" is said
   when it turns out to need a tool;
 - a fixed greeting (`greeting`) is spoken the moment the call connects;

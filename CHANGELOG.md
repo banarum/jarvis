@@ -13,6 +13,8 @@
   and saved it over the compacted one. It is now folded in memory too, once, counted from the
   last word. The notes are up to 1500 words, per project, decisions item by item, and the
   earlier notes are carried over whole instead of being cut to their first lines.
+- **Slow brain.** After 2.5 s without a first word the question is asked a second time and the
+  faster request wins. The second request goes to the same model, not a different one.
 - **The same sentence twice.** What was announced before a hand-off ("asking…") is not repeated
   after it ("asked…").
 

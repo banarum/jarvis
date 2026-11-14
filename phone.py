@@ -46,7 +46,8 @@ KEYTERMS = ["Xcode", "TestFlight"]           # extra words for it to expect
 # Used when the main brain goes quiet. Same gateway by default, a different model family.
 BACKUP = {"url": os.environ.get("JARVIS_BACKUP_URL", local.BRAIN_URL).rstrip("/"),
           "key": os.environ.get("JARVIS_BACKUP_KEY") or local.BRAIN_KEY,
-          "model": os.environ.get("JARVIS_BACKUP_MODEL", "gpt-5.4-mini")}
+          "model": os.environ.get("JARVIS_BACKUP_MODEL") or local.BRAIN_MODEL}   # by default the same model, asked afresh
+HEDGE = 2.5                                  # seconds without a first word before a second request is raced against the first
 ALIASES = {}                                 # canonical name -> ways the transcriber mishears it (from telegram.json)
 PRIMARY_DOWN_UNTIL = 0.0                     # the main brain stalled: use the backup until then
 EXTRA = {"thinking": {"type": "disabled"}}   # added to every brain request: no hidden reasoning on a call
@@ -177,8 +178,48 @@ other projects waits until they have their answer."""
 
 
 async def stream_chat(messages, tools, on_text, on_tool, backup=False):
+    """One reply from the brain. If its first word is late, the question is asked a second time
+    and whichever request speaks first is the reply; the other is dropped."""
+    if backup or not HEDGE or not BACKUP["key"]:
+        return await stream_once(messages, tools, on_text, on_tool, backup)
+    won, tasks = [], []
+
+    def only(i, fn):
+        def passed(x):
+            if not won:
+                won.append(i)
+                for j, t in enumerate(tasks):
+                    if j != i:
+                        t.cancel()
+            if won[0] == i:
+                fn(x)
+        return passed
+
+    try:
+        tasks.append(asyncio.create_task(stream_once(messages, tools, only(0, on_text), only(0, on_tool), False)))
+        await asyncio.wait(tasks, timeout=HEDGE)
+        if not won and not (tasks[0].done() and not tasks[0].exception()):
+            log.info("the brain is slow: asking a second time")
+            tasks.append(asyncio.create_task(stream_once(list(messages), tools, only(1, on_text), only(1, on_tool), True)))
+        left, error = set(tasks), None
+        while left:
+            done, left = await asyncio.wait(left, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                if t.cancelled():
+                    continue
+                if t.exception() is None and (not won or tasks[won[0]] is t):
+                    return t.result()
+                error = t.exception() or error
+        raise error or asyncio.TimeoutError()
+    finally:
+        for t in tasks:
+            t.cancel()
+
+
+async def stream_once(messages, tools, on_text, on_tool, backup=False):
     """local.chat, but streamed: text is handed over as it is written."""
-    url, key, model, extra = (BACKUP["url"], BACKUP["key"], BACKUP["model"], {}) if backup else \
+    url, key, model, extra = (BACKUP["url"], BACKUP["key"], BACKUP["model"],
+                              EXTRA if BACKUP["model"] == local.BRAIN_MODEL else {}) if backup else \
         (local.BRAIN_URL, local.BRAIN_KEY, local.BRAIN_MODEL, EXTRA)
     body = {"model": model, "messages": messages, "tools": tools, "stream": True,
             "stream_options": {"include_usage": True}, **extra}
