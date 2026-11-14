@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-14 — The chat becomes part of the conversation
+
+### Added
+- Results by text: when the person who asked has hung up, an agent's answer reaches them as
+  one short Telegram message, batched, project name first. The recipient is whoever asked;
+  no id is configured for it.
+- Chat sessions: a whitelisted person can write to the account and work in text with the
+  same conversation, tools and rules as on a call. Voice notes are transcribed and treated
+  as messages.
+- Nothing is written to someone while they are on a call.
+
+### Changed
+- Conversations and open questions are kept per caller.
+
 ## 2026-11-13 — The line moves to Telegram
 
 Jarvis is now reached by calling a Telegram account. The browser call page is gone.
