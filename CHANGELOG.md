@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-15 — After the first day of calls and chat
+
+### Fixed
+- **No more dead air.** A real phrase that got an empty reply from the brain is asked again at
+  once; if that is empty too, the caller hears "say it again". Before, the line stayed silent
+  until the caller spoke (up to 70 s on real calls).
+- **The transcriber's echo of its own hints.** Agent folder names (hyphens, underscores, dots)
+  are no longer given to it as words to expect, and a phrase that is only such a name is
+  dropped: it came back on noise and the assistant switched projects on it.
+- **The conversation kept growing back.** An open chat session held the long version in memory
+  and saved it over the compacted one. It is now folded in memory too, once, counted from the
+  last word. The notes are up to 1500 words, per project, decisions item by item, and the
+  earlier notes are carried over whole instead of being cut to their first lines.
+- **The same sentence twice.** What was announced before a hand-off ("asking…") is not repeated
+  after it ("asked…").
+
 ## 2026-11-14 — The chat becomes part of the conversation
 
 ### Added

@@ -50,6 +50,9 @@ BACKUP = {"url": os.environ.get("JARVIS_BACKUP_URL", local.BRAIN_URL).rstrip("/"
 ALIASES = {}                                 # canonical name -> ways the transcriber mishears it (from telegram.json)
 PRIMARY_DOWN_UNTIL = 0.0                     # the main brain stalled: use the backup until then
 EXTRA = {"thinking": {"type": "disabled"}}   # added to every brain request: no hidden reasoning on a call
+EMPTY = ("you answered nothing, and the caller is waiting in silence. Answer now, one short sentence starting "
+         "with ●: confirm what you did or understood; if what they said matches something you just offered or "
+         "asked about, take it as their answer; only if it makes no sense, say what you did not catch.")
 STALL = 5                                    # seconds of silence from the brain before the request is retried
 LEFTOVER = {}                                # caller -> news that could not be delivered, told on their next call
 CACHE = {}                                   # stock phrases, already synthesised
@@ -59,7 +62,8 @@ local.LEVEL_WINDOW = 24000   # judge loudness from half a second, not a whole on
 CONTEXT = CONF_DIR / "phone-context.json"    # the conversation that outlives a call (one file per caller)
 COMPACT_AFTER = 3 * 60                       # seconds of quiet after a hang-up before it is compacted
 COMPACT_OVER = 60_000                        # characters it may reach before that happens
-KEEP = 16                                    # messages left word for word after compacting
+SUMMARY = "(System: summary of your earlier calls, written by you:"
+KEEP = 24                                    # messages left word for word after compacting
 EPOCH = {}                                   # caller -> bumped by every session: a compaction that straddles one is dropped
 
 # --- the text channel: results by message when nobody is on the line ---
@@ -374,26 +378,50 @@ def save_context(msgs, caller=None, ended=None):
     tmp.replace(f)
 
 
-async def compact_later(caller, epoch):
-    """Some minutes after a hang-up, with nobody back on the line: fold the older talk into a summary."""
+PENDING = {}                                 # caller -> the compaction waiting for them to go quiet
+
+
+def compact_soon(caller, session=None):
+    """One compaction per person, counted from their last word (spoken or written)."""
+    if caller in PENDING:
+        PENDING[caller].cancel()
+    PENDING[caller] = asyncio.create_task(compact_later(caller, EPOCH.get(caller), session))
+
+
+async def compact_later(caller, epoch, session=None):
+    """Some minutes after the last word, with nobody on the line: fold the older talk into a summary.
+    A chat session that is still open holds the conversation in memory, so it is folded there too:
+    otherwise its next save would put the long version back."""
     await asyncio.sleep(COMPACT_AFTER)
-    msgs, ended = load_context(caller)
+    live = session is not None and not session.closed
+    if live:
+        msgs, ended = session.msgs[1:], None
+    else:
+        msgs, ended = load_context(caller)
     cut = next((i for i in range(len(msgs) - KEEP, 0, -1) if msgs[i]["role"] == "user"), 0)
     if epoch != EPOCH.get(caller) or size(msgs) < COMPACT_OVER or not cut:
         return
-    lines = []
+    edge = msgs[cut]
+    before, lines = "", []
     for m in msgs[:cut]:
+        text = str(m.get("content") or "")
+        if text.startswith(SUMMARY):            # the notes from last time are carried over whole
+            before = text
+            continue
         calls = ", ".join(f"{c['function']['name']}({c['function']['arguments'][:300]})" for c in m.get("tool_calls") or [])
-        lines.append(f"[{m['role']}] {str(m.get('content') or '')[:1500]} {calls}".strip())
+        lines.append(f"[{m['role']}] {text[:1500]} {calls}".strip())
     ask = [{"role": "system", "content":
-            f"Below is the earlier part of {CFG['assistant_name']}'s phone conversations with {CFG['user_name']} "
-            "(with tool calls and system notes). Write the notes the assistant needs to carry on as if it "
-            "remembered all of it: per project, what was found out (keep names, numbers, versions), what was "
-            "decided, what was sent to which agent and is still awaited, open questions, and anything the "
-            "user asked about how to behave. Plain text, up to 500 words, in the conversation's language."},
-           {"role": "user", "content": "\n".join(lines)[-150_000:]}]
+            f"Below is the earlier part of {CFG['assistant_name']}'s conversations with {CFG['user_name']} "
+            "(calls and chat, with tool calls and system notes), preceded by your notes from before it, if any. "
+            "Write the notes the assistant needs to carry on as if it remembered all of it. One section per "
+            "project: what was found out (keep names, numbers, versions, links), every decision the user made "
+            "(item by item when a list was gone through: done / rejected / doubtful), what was sent to which "
+            "agent and is still awaited, open questions. Then a section with what the user said about how to "
+            "behave. Keep everything from the earlier notes that still holds; drop only what was superseded. "
+            "Plain text, up to 1500 words, in the conversation's language."},
+           {"role": "user", "content": (before + "\n\n" if before else "") + "\n".join(lines)[-150_000:]}]
     try:
-        async with ClientSession(timeout=ClientTimeout(total=120)) as http:
+        async with ClientSession(timeout=ClientTimeout(total=180)) as http:
             async with http.post(local.BRAIN_URL + "/chat/completions", headers={"Authorization": "Bearer " + local.BRAIN_KEY},
                                  json={"model": local.BRAIN_MODEL, "messages": ask, **EXTRA}) as r:
                 data = await r.json(content_type=None)
@@ -403,9 +431,30 @@ async def compact_later(caller, epoch):
         return
     if epoch != EPOCH.get(caller) or not summary:      # someone called meanwhile: their call owns the history now
         return
-    kept = [{"role": "user", "content": "(System: summary of your earlier calls, written by you:\n" + summary + ")"}] + msgs[cut:]
-    save_context(kept, caller, ended)
-    log.info("conversation compacted: %d -> %d characters", size(msgs), size(kept))
+    note = {"role": "user", "content": SUMMARY + "\n" + summary + ")"}
+    if live:
+        at = next((i for i, x in enumerate(session.msgs) if x is edge), 0)
+        if session.closed or at < 2:
+            return
+        was = size(session.msgs[1:])
+        session.msgs[1:at] = [note]
+        kept = tidy(session.msgs[1:])
+        save_context(kept, caller)
+    else:
+        was, kept = size(msgs), [note] + msgs[cut:]
+        save_context(kept, caller, ended)
+    log.info("conversation compacted: %d -> %d characters", was, size(kept))
+
+
+def echo(text):
+    """The transcriber handing a hint back as if it were said: an agent's folder name, spelled as on disk."""
+    t = text.strip(" .,!?…")
+    return bool(re.search(r"[-_/]", t)) and " " not in t and t in {a["project"] for a in server.AGENTS.values()}
+
+
+def hints():
+    """Words for the transcriber to expect. Names nobody pronounces as written are left out: it returns them on noise."""
+    return [v for v in [*local.vocabulary(), *KEYTERMS] if v not in VOCAB_DROP and not re.search(r"[-_/.]", v)][:100]
 
 
 def phantom(text, call_age):
@@ -480,7 +529,7 @@ def phone(base):
             if self.shared:
                 try:
                     save_context(tidy(self.msgs[1:]), self.caller)
-                    asyncio.create_task(compact_later(self.caller, EPOCH.get(self.caller)))
+                    compact_soon(self.caller, self if self.text and not self.closed else None)
                 except Exception:
                     log.exception("could not save the conversation")
 
@@ -618,7 +667,7 @@ def phone(base):
             # SpeakCall.listen, plus the languages to expect: without them noise comes back as any language.
             config = types.LiveConnectConfig(input_audio_transcription=types.AudioTranscriptionConfig(
                 language_codes=CFG["languages"],
-                custom_vocabulary=([v for v in local.vocabulary() if v not in VOCAB_DROP] + KEYTERMS)[:100]))
+                custom_vocabulary=hints()))
             while not self.closed:
                 try:
                     async with self.client.aio.live.connect(model=local.EARS_MODEL, config=config) as s:
@@ -679,7 +728,7 @@ def phone(base):
 
         async def user_said(self, text):
             self.heard_at = time.time()
-            if not self.text and phantom(text, self.heard_at - self.started):
+            if not self.text and (phantom(text, self.heard_at - self.started) or echo(text)):
                 self.log("ears_dropped", text=text)
                 return
             if self.held and self.held["left"] > 1.0 and BACKCHANNEL.match(text.strip()):
@@ -727,10 +776,15 @@ def phone(base):
             self.replies = self.replies[-3:] + [reply]
 
             marker, head = None, ""                     # this response's verdict on the caller's turn
+            retried = quiet = False                     # asked again after an empty reply / only acknowledgements since we spoke
 
             def speak(sentence):
                 nonlocal first
                 sentence = re.sub(r"\[[^\]]*\]|\(System:[^)]*\)|[●◐○]", "", sentence).strip()   # notes are not speech
+                if sentence.strip(" .…") and (quiet or any(
+                        difflib.SequenceMatcher(None, sentence.lower(), s.lower()).ratio() > 0.7 for s in said)):
+                    self.log("said_twice", text=sentence)       # the same thing again after the tool call
+                    return
                 if sentence.strip(" .…"):   # "..." means: nothing to say
                     first = first or int((time.time() - t0) * 1000)
                     said.append(sentence)
@@ -761,6 +815,8 @@ def phone(base):
                     self.say_aloud(FILLERS.get(name, FILLER))
 
             for _ in range(12):
+                if self.inbox:
+                    quiet = False
                 m.extend({"role": "user", "content": t} for t in self.inbox)
                 self.inbox.clear()
                 backup = time.time() < PRIMARY_DOWN_UNTIL
@@ -814,8 +870,17 @@ def phone(base):
                     results = await asyncio.gather(*(self.brain_tool(c) for c in calls))
                     m.extend({"role": "tool", "tool_call_id": c["id"], "content": json.dumps(r, ensure_ascii=False)}
                              for c, r in zip(calls, results))
+                    # "Спрашиваю у него…" was said, the message went: saying it again as "спросил…" adds nothing.
+                    quiet = bool(said) and all(isinstance(r, dict) and r.get("status") in ("sent", "saved") for r in results)
                 elif not self.inbox:
+                    if self.user_turn and not said and marker not in WAIT and not retried:
+                        retried = True              # a real phrase and not a word back: never leave them in silence
+                        self.log("empty_reply", raw=str(msg.get("content"))[:200])
+                        m.append({"role": "user", "content": "(System: " + EMPTY + ")"})
+                        continue
                     break
+            if self.user_turn and retried and not said and marker not in WAIT:
+                speak("Не уловил, повтори, пожалуйста." if RU else "I didn't catch that, say it again please.")
             self.user_turn = False
             text = ("\n" if self.text else " ").join(said)
             if self.text:

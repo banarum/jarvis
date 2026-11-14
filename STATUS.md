@@ -178,3 +178,14 @@ that cannot be trusted.
   stamped with the caller, one result message arrived, a second allowlisted person got
   their own conversation, nothing was written during a simulated call. Not yet exercised
   on the real account.
+
+## 15 Nov — review of the first full day (nine calls and the chat), 6/10
+
+The chat worked on its first live day (results as single messages, voice notes, a list
+review finished in writing). On calls: five silences of 20–70 s after an empty brain reply,
+the transcriber returning agent folder names nobody said, one call lost to a name heard
+three different ways, seven stalls of the main brain, and the memory of the day squeezed to
+a few lines. Fixed the same night and tested offline with a scripted brain: empty replies
+are retried, hint echoes dropped, compaction folds the open chat session and keeps longer
+notes, repeats after a hand-off are not spoken. Still open: matching an unclear answer to
+the options just offered, and racing the backup brain earlier (2.5 s instead of 5 s).
