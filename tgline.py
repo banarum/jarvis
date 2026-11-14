@@ -64,6 +64,8 @@ def load_tg():
         "brain_extra": {"thinking": {"type": "disabled"}},   # added to brain requests on calls ({} = let it reason)
         "compact_after_min": 3,   # quiet minutes after a hang-up before a long conversation is summarised
         "compact_over_chars": 60000,
+        "text_collect_s": 90,     # results for someone who hung up are gathered this long, then sent as one message
+        "text_gap_s": 180,        # and at most one such message goes out in this many seconds
         "speed": None,            # speech rate of the speak/local pipelines here; None = config.json's "speed"
     }
     if TG_CONF.exists():
@@ -311,6 +313,28 @@ class Line:
                 due = time.monotonic()
 
 
+class Chat:
+    """The same thing for a chat session: what the call class "says" is sent as a Telegram message."""
+
+    text_only, persist, self_timed = True, True, True
+
+    def __init__(self, caller, send):
+        self.caller, self.send, self.closed = caller, send, False
+
+    async def send_text(self, text):
+        await self.send(self.caller, text)
+
+    async def send_json(self, msg):
+        if msg.get("type") in ("you", "jarvis", "error"):
+            log.info("chat %s: %s", msg["type"], str(msg.get("text"))[:300])
+
+    async def send_bytes(self, pcm):
+        pass
+
+    async def close(self):
+        self.closed = True
+
+
 def call_class(mode):
     cls = server.local_call(mode)
     if not cls:
@@ -320,6 +344,7 @@ def call_class(mode):
     phone.GREETING = TG["greeting"] or phone.GREETING
     phone.KEYTERMS = list(TG["keyterms"])
     phone.ALIASES = dict(TG["aliases"])
+    phone.COLLECT, phone.GAP = TG["text_collect_s"], TG["text_gap_s"]
     phone.COMPACT_AFTER, phone.COMPACT_OVER = TG["compact_after_min"] * 60, TG["compact_over_chars"]
     return phone.phone(cls)
 
@@ -416,7 +441,7 @@ class Phone:
         self.line = None          # the live call, one at a time
         self.peer = None
         self.work_chat = None
-        self.texts = {}           # user id -> text conversation
+        self.chats = {}           # user id -> their chat session (only while they are not on a call)
         self.ignored = set()
 
     async def run(self):
@@ -461,9 +486,18 @@ class Phone:
             await changed(chat_id, net_state)
         self.calls._handle_connection_changed = connection_changed
 
+        import phone
+        phone.CHAT = self.chat    # where results go when the person who asked has hung up
+        old = phone.CONTEXT       # the single conversation from before conversations were per caller
+        if old.exists() and len(TG["whitelist"]) == 1:
+            mine = phone.context_file(next(iter(TG["whitelist"])))
+            if not mine.exists():
+                old.rename(mine)
         self.tg.add_event_handler(self.on_message, events.NewMessage(incoming=True))
         await self.calls.start()
         asyncio.create_task(server.monitor())
+        only = next(iter(TG["whitelist"])) if len(TG["whitelist"]) == 1 else None
+        phone.resume_ledger(only)     # questions that were out when the line last stopped
         if server.local_call():   # load Whisper now, not on the first words of a call
             import local
             asyncio.get_running_loop().run_in_executor(local.EARS, local.transcribe, bytes(32000))
@@ -491,11 +525,14 @@ class Phone:
         self.peer = user
         self.line = line = Line(lambda pcm: self.calls.send_frame(user, Device.MICROPHONE, pcm))
         line.persist = True       # the conversation carries over to the next call (phone.py)
+        line.caller = user        # whose conversation it is, and who gets the results later
         t0 = time.time()
         try:
             # Our "microphone" is whatever Line.play pushes; the caller's voice comes back as frames.
             await self.calls.play(user, Stream(microphone=AudioStream(MediaSource.EXTERNAL, "", mono48)))
             await self.calls.record(user, RecordStream(True, mono48))
+            if user in self.chats:            # the chat hands the conversation over to the call
+                await self.chats.pop(user).close_text()
             log.info("call from %s answered in %d ms", user, int((time.time() - t0) * 1000))
             t0 = time.time()
             await run_call(line, self.client)
@@ -548,11 +585,24 @@ class Phone:
                 files = await self.save_files(event)
                 chat_note(who, event.raw_text or "", files, event.date.timestamp())
             elif event.is_private and event.sender_id in TG["whitelist"]:
+                if event.voice:
+                    text = await self.voice_note(event)
+                    if text:
+                        await self.typed(event.sender_id, "(voice note) " + text)
+                    else:
+                        await self.write(event.sender_id, "Не разобрал голосовое." if CFG["languages"][0] == "ru"
+                                         else "Could not make out the voice note.")
+                    return
                 files = await self.save_files(event)
+                if files:
+                    chat = await self.chat(event.sender_id)      # on a call the call is told instead
+                    if chat:
+                        await chat.files_added(files)
                 if event.raw_text:
                     await self.typed(event.sender_id, event.raw_text)
                 elif files:
-                    await event.reply("In the queue: " + ", ".join(files))
+                    await self.write(event.sender_id, "В очереди: " + ", ".join(files) if CFG["languages"][0] == "ru"
+                                     else "In the queue: " + ", ".join(files))
             elif event.is_private and event.sender_id not in self.ignored:
                 self.ignored.add(event.sender_id)
                 log.info("message from %s ignored: not whitelisted", event.sender_id)
@@ -583,29 +633,48 @@ class Phone:
             await call.files_added([name])
         return [name]
 
+    async def chat(self, user):
+        """This person's chat session: the conversation of their calls, in writing. None while
+        they are on a call (then everything is spoken and nothing is written) or if not allowed."""
+        if user not in TG["whitelist"] or (self.line and self.peer == user):
+            return None
+        chat = self.chats.get(user)
+        if not chat or chat.closed:
+            chat = self.chats[user] = call_class(TG["pipeline"])(Chat(user, self.write), self.client)
+            await chat.start_text()
+        return chat
+
+    async def write(self, user, text):
+        if user not in TG["whitelist"] or (self.line and self.peer == user):
+            log.info("message to %s held back: %s", user, "on a call" if self.line else "not whitelisted")
+            return
+        await self.tg.send_message(user, text)
+
     async def typed(self, user, text):
-        """A whitelisted user wrote instead of calling: into the live call if it
-        is theirs, otherwise a text conversation with the same brain and tools."""
+        """A whitelisted user wrote: into their live call if they are on one (it is answered
+        aloud), otherwise into their chat session, which is the same conversation."""
         if self.line and self.peer == user:
             self.line.text(text)
             return
-        call = self.texts.get(user)
-        if not call:
-            base = server.local_call("local") or server.local_call("speak")
-            if not base:
-                await self.tg.send_message(user, "Text chat needs the local pipeline (JARVIS_BRAIN_KEY).")
-                return
+        chat = await self.chat(user)
+        if chat:
+            await chat.user_said(text)
 
-            class TextCall(base):
-                async def speak(self, text):          # written, not spoken
-                    await self.ws.send_json({"type": "jarvis", "text": text})
-
-            async def reply(msg):
-                if msg["type"] == "jarvis":
-                    await self.tg.send_message(user, msg["text"])
-
-            call = self.texts[user] = TextCall(Line(None, on_text=reply), self.client)
-        await call.user_said(text)
+    async def voice_note(self, event):
+        """A voice message instead of typing: transcribed here, then treated like any message."""
+        import local
+        with tempfile.TemporaryDirectory() as d:
+            path = await event.download_media(file=os.path.join(d, "note"))
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-loglevel", "error", "-i", path, "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            pcm, err = await proc.communicate()
+        if proc.returncode or not pcm:
+            log.warning("could not read a voice note: %s", err.decode(errors="replace")[-200:])
+            return ""
+        text = await asyncio.get_running_loop().run_in_executor(local.EARS, local.transcribe, pcm)
+        log.info("voice note of %.0f s: %s", len(pcm) / 32000, text[:200])
+        return text
 
 
 # --- selftest: the whole pipeline without Telegram ---------------------------------
