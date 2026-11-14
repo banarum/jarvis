@@ -83,6 +83,25 @@ with the rest of `logs/`.
 Messages to agents that change a product are held by `send_to_agent` until the caller says
 yes to a read-back (`confirm_send`), unless the caller's last phrase was itself a clear go.
 
+## The chat: the same conversation in writing
+
+- **Results after a hang-up.** When an agent answers something that was asked on a call
+  and nobody is on the line any more, the person who asked gets one text message: results
+  are gathered for `text_collect_s`, at most one message goes out per `text_gap_s`, and
+  something that needs a yes is sent at once. Only what was asked through the assistant is
+  sent; other agents finishing is not.
+- **Who gets it.** Whoever asked: every hand-off is stamped with the caller, and the
+  allowlist is checked again when the message is sent. No id is configured for this.
+- **A working session.** A whitelisted person can write, or send a voice note (transcribed
+  with Whisper), and gets a text answer from the same brain, tools and conversation as
+  their calls. A typed yes approves like a spoken one.
+- **One channel at a time.** While someone is on a call nothing is written to them: typed
+  messages are answered aloud and results are spoken. Writing resumes when the call ends,
+  and the next call knows what was written.
+- **Per person.** Each whitelisted person has their own conversation
+  (`~/.config/jarvis/phone-context-<id>.json`) and their own open questions. The
+  assistant's notes (`memory.json`) are shared by everyone on the allowlist.
+
 ## Phone manners (`phone.py`)
 
 On this line the `speak` and `local` pipelines are wrapped by `phone.py`, because on a real
@@ -124,7 +143,7 @@ All in `~/.config/jarvis/` (mode 600), covered by `.gitignore` in case they stra
 | `env` | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, model keys |
 | `telegram.json` | whitelist ids, work chat |
 | `telegram-chat.jsonl`, `uploads/` | work chat contents |
-| `phone-context.json` | the running conversation of the calls |
+| `phone-context-<id>.json` | each caller's running conversation, calls and chat |
 
 `logs/` holds call transcripts and `latency.jsonl`.
 

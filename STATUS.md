@@ -171,3 +171,10 @@ that cannot be trusted.
 - 2026-11-13 (20:40) — The Gemini Live pipeline is deleted from the code (`server.py`): no
   model does listening, thinking and speaking in one any more. Pipelines left: `speak`
   (default) and `local`. Gemini remains only as the transcriber and the voice of `speak`.
+- 2026-11-14 — Text channel built: results by message after a hang-up (batched 90 s, one
+  per 3 min, urgent ones at once), recipient = who asked, chat sessions on the same
+  conversation, voice notes via Whisper, silence in the chat during a call, conversations
+  per caller. Tested without Telegram (faked agent and message sender): the hand-off was
+  stamped with the caller, one result message arrived, a second allowlisted person got
+  their own conversation, nothing was written during a simulated call. Not yet exercised
+  on the real account.
