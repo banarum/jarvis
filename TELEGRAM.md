@@ -185,3 +185,9 @@ machine, and an audio-only call costs nothing extra.
 
 Limits: Vision reads text and names scenes from a fixed list; it does not describe a picture
 in sentences. Tested with frames in the call library's format, not yet on a live video call.
+
+## Restarting
+
+Use `./restart.sh`, not `kill`: it will not restart during a call, and it runs
+`tgline.py selftest` first (a spoken question through the whole pipeline, about a minute) and
+refuses if the assistant does not answer.

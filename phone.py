@@ -70,6 +70,7 @@ EPOCH = {}                                   # caller -> bumped by every session
 # --- the text channel: results by message when nobody is on the line ---
 COLLECT = 90                                 # seconds results are gathered before one message goes out
 GAP = 180                                    # at most one result message in this many seconds
+DEAF = 6                                     # seconds without the caller's sound before the assistant says so
 AFTER_HANGUP = 20                            # they may be calling straight back
 OUTBOX = {}                                  # caller -> {"items", "urgent", "task", "sent"}
 HUNG = {}                                    # caller -> when their last call ended
@@ -562,7 +563,8 @@ def phone(base):
                 super().log(kind, **kw)
 
         async def run(self):
-            tasks = [asyncio.create_task(self.driver()), asyncio.create_task(self.mouth())]
+            tasks = [asyncio.create_task(self.driver()), asyncio.create_task(self.mouth()),
+                     asyncio.create_task(self.hearing())]
             try:
                 await super().run()
             finally:
@@ -794,6 +796,22 @@ def phone(base):
                 self.req.cancel()
             self.shut_up()
             self.wake.set()
+
+        async def hearing(self):
+            """No sound is arriving from the caller (their network, a muted call, or a fault here): say so, once
+            per silence, instead of waiting mutely for words that cannot come."""
+            told = False
+            while not self.closed and DEAF and hasattr(self.ws, "ok_at"):
+                await asyncio.sleep(1)
+                gone = time.time() - max(self.ws.ok_at, self.started)
+                if gone < DEAF:
+                    told = False
+                elif not told and not self.talking_now():
+                    told = True
+                    self.log("deaf", seconds=int(gone))
+                    log.warning("nothing heard from the caller for %d s: telling them", gone)
+                    self.say_aloud("Я тебя не слышу: звук от тебя не доходит. Если так и останется, перезвони." if RU else
+                                   "I can't hear you: no sound is reaching me. If it stays like this, call again.")
 
         def look(self):
             """With the caller's words goes what their camera shows now, if that changed since it was last told."""

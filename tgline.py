@@ -65,6 +65,7 @@ def load_tg():
         "compact_after_min": 3,   # quiet minutes after a hang-up before a long conversation is summarised
         "compact_over_chars": 60000,
         "text_collect_s": 90,     # results for someone who hung up are gathered this long, then sent as one message
+        "deaf_after_s": 6,        # no sound from the caller for this long: the assistant says it cannot hear them
         "text_gap_s": 180,        # and at most one such message goes out in this many seconds
         "vision": False,          # on a video call, read what the caller's camera or shared screen shows (Apple Vision, on this Mac)
         "vision_every_s": 4,      # how often a still is taken from the video
@@ -132,6 +133,7 @@ class Line:
         self.holding = False              # the answer is paused: someone made a sound over it
         self.fed_at = time.time()         # when the caller's audio last arrived
         self.deaf = False
+        self.ok_at = time.time()          # when their audio last arrived AND was taken in without an error
         self.self_timed = False           # the call class times its own answers (phone.py)
         self.still = None                 # the latest picture from the caller: (source, I420 bytes, width, height, quarter turns, when)
         self.sight = None                 # what it showed, in words: (text, when, source); phone.py tells the brain
@@ -185,6 +187,7 @@ class Line:
             frame = bytes(self.buf[:self.FRAME])
             del self.buf[:self.FRAME]
             self.frame(frame)
+        self.ok_at = self.fed_at          # only when the sound got all the way through
 
     def frame(self, f):
         x = np.frombuffer(f, dtype=np.int16).astype(np.float32) / 32768
@@ -382,6 +385,7 @@ def call_class(mode):
     phone.KEYTERMS = list(TG["keyterms"])
     phone.ALIASES = dict(TG["aliases"])
     phone.COLLECT, phone.GAP = TG["text_collect_s"], TG["text_gap_s"]
+    phone.DEAF = TG["deaf_after_s"]
     phone.COMPACT_AFTER, phone.COMPACT_OVER = TG["compact_after_min"] * 60, TG["compact_over_chars"]
     return phone.phone(cls)
 
@@ -508,14 +512,20 @@ class Phone:
         @self.calls.on_update(filters.stream_frame(Direction.INCOMING, Device.MICROPHONE))
         async def heard(_, u):
             if self.line and u.chat_id == self.peer:
-                for f in u.frames:
-                    self.line.feed(f.frame)
+                try:
+                    for f in u.frames:
+                        self.line.feed(f.frame)
+                except Exception:           # the library swallows what a handler raises: a deaf line with a clean log
+                    self.trouble("the caller's audio could not be taken in: the assistant is deaf")
 
         for device, source in ((Device.CAMERA, "camera"), (Device.SCREEN, "shared screen")):
             @self.calls.on_update(filters.stream_frame(Direction.INCOMING, device))
             async def seen(_, u, source=source):
                 if self.line and u.chat_id == self.peer and u.frames:
-                    self.line.picture(source, u.frames[-1])
+                    try:
+                        self.line.picture(source, u.frames[-1])
+                    except Exception:
+                        self.trouble("the caller's video could not be taken in")
 
         @self.calls.on_update(filters.chat_update(ChatUpdate.Status.LEFT_CALL))
         async def left(_, u):
@@ -559,6 +569,12 @@ class Phone:
         await self.tg.run_until_disconnected()
 
     # --- calls ---
+
+    def trouble(self, what):
+        """An error inside a media handler, logged with its traceback: the first, then every 500th."""
+        self.troubles = getattr(self, "troubles", 0) + 1
+        if self.troubles % 500 == 1:
+            log.exception("%s (error %d)", what, self.troubles)
 
     async def answer(self, user):
         from ntgcalls import MediaSource
@@ -760,6 +776,17 @@ async def selftest(question):
                 return
 
     await quiet_for(3, 40)                       # the greeting
+    problems = []
+    if TG["vision"]:                             # a picture arrives first, as on a video call: sound must still get through
+        import types
+        import vision
+        w, h = 320, 240
+        grey = bytes([128]) * (w * h * 3 // 2)
+        try:
+            line.picture("camera", types.SimpleNamespace(frame=grey, info=types.SimpleNamespace(width=w, height=h, rotation=0)))
+            vision.describe(grey, w, h)
+        except Exception as e:
+            problems.append(f"vision: {e!r}")
     print("-- greeting over, asking:", question)
     for i in range(0, len(speech), 960):         # in real time, as the call delivers it
         line.feed(speech[i:i + 960])
@@ -775,8 +802,16 @@ async def selftest(question):
     with wave.open(str(out), "wb") as w:
         w.setnchannels(1), w.setsampwidth(2), w.setframerate(48000)
         w.writeframes(bytes(heard))
+    if not line.latencies:
+        problems.append("the question was not answered")
+    if len(heard) < 48000:
+        problems.append("nothing was played to the caller")
     print(f"-- pipeline {TG['pipeline']}: latencies {line.latencies} ms after end of phrase "
           f"(+{line.waited_ms} ms of silence before the phrase was judged over). What the caller would hear: {out}")
+    if problems:
+        print("-- SELF-TEST FAILED: " + "; ".join(problems))
+        sys.exit(1)
+    print("-- self-test passed")
 
 
 def main():

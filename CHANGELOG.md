@@ -10,6 +10,16 @@
   caller's next words, once per change. No cloud vision, no model download. It reads and
   labels; it does not write descriptions. The last still is kept in `logs/vision-last.jpg`.
   New file `vision.py`; needs `pyobjc-framework-Vision` (macOS only).
+- **`restart.sh`**: the only way the line should be restarted. It refuses while a call is live,
+  runs the self-test first and leaves the running line alone if that fails.
+- **"I can't hear you."** If no sound from the caller gets through for `deaf_after_s` seconds
+  (6), the assistant says so once instead of waiting in silence.
+
+### Fixed
+- The first vision build stored the video still under the name of the method that takes in
+  the caller's sound, so the line was deaf for three calls. Errors inside the media handlers
+  were swallowed by the call library; they are now logged with a traceback. The self-test
+  sends a picture before the sound and exits non-zero when the question is not answered.
 
 ## 2026-11-15 — After the first day of calls and chat
 
