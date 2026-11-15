@@ -66,6 +66,8 @@ def load_tg():
         "compact_over_chars": 60000,
         "text_collect_s": 90,     # results for someone who hung up are gathered this long, then sent as one message
         "text_gap_s": 180,        # and at most one such message goes out in this many seconds
+        "vision": False,          # on a video call, read what the caller's camera or shared screen shows (Apple Vision, on this Mac)
+        "vision_every_s": 4,      # how often a still is taken from the video
         "speed": None,            # speech rate of the speak/local pipelines here; None = config.json's "speed"
     }
     if TG_CONF.exists():
@@ -131,6 +133,41 @@ class Line:
         self.fed_at = time.time()         # when the caller's audio last arrived
         self.deaf = False
         self.self_timed = False           # the call class times its own answers (phone.py)
+        self.frame = None                 # the latest picture from the caller: (source, I420 bytes, width, height, quarter turns, when)
+        self.sight = None                 # what it showed, in words: (text, when, source); phone.py tells the brain
+        self.sight_every = float(TG["vision_every_s"])
+
+    def picture(self, source, f):
+        self.frame = (source, f.frame, f.info.width, f.info.height, int(f.info.rotation) // 90 % 4, time.time())
+
+    async def watch(self):
+        """Every few seconds: if the picture changed, read it (text, kind of scene, faces)."""
+        import vision
+        if not vision.READY:
+            log.warning("vision is on in the config but Apple's Vision framework is not available here")
+            return
+        last, looked, announced = None, 0.0, False
+        while not self.closed:
+            await asyncio.sleep(max(1.0, self.sight_every))
+            if not self.frame or self.frame[5] <= looked:
+                continue
+            source, data, w, h, turns, looked = self.frame
+            if not announced:
+                announced = True
+                log.info("video from the caller: %s, %dx%d", source, w, h)
+            try:
+                small = vision.thumb(data, w, h)
+                if not vision.changed(last, small) and self.sight and self.sight[2] == source:
+                    self.sight = (self.sight[0], time.time(), source)       # still showing the same thing
+                    continue
+                last = small
+                t0 = time.time()
+                text = await asyncio.get_running_loop().run_in_executor(
+                    None, vision.describe, data, w, h, turns, CFG["languages"], server.LOG_DIR / "vision-last.jpg")
+                log.info("%s (%d ms): %s", source, (time.time() - t0) * 1000, text[:200] or "nothing readable")
+                self.sight = (text or "nothing readable: no text, no recognisable scene", time.time(), source)
+            except Exception:
+                log.exception("could not read the video frame")
 
     # in
 
@@ -474,6 +511,12 @@ class Phone:
                 for f in u.frames:
                     self.line.feed(f.frame)
 
+        for device, source in ((Device.CAMERA, "camera"), (Device.SCREEN, "shared screen")):
+            @self.calls.on_update(filters.stream_frame(Direction.INCOMING, device))
+            async def seen(_, u, source=source):
+                if self.line and u.chat_id == self.peer and u.frames:
+                    self.line.picture(source, u.frames[-1])
+
         @self.calls.on_update(filters.chat_update(ChatUpdate.Status.LEFT_CALL))
         async def left(_, u):
             log.info("telegram says the call with %s ended: %s", u.chat_id, u.status)
@@ -526,11 +569,19 @@ class Phone:
         self.line = line = Line(lambda pcm: self.calls.send_frame(user, Device.MICROPHONE, pcm))
         line.persist = True       # the conversation carries over to the next call (phone.py)
         line.caller = user        # whose conversation it is, and who gets the results later
-        t0 = time.time()
+        t0, eyes = time.time(), None
         try:
             # Our "microphone" is whatever Line.play pushes; the caller's voice comes back as frames.
             await self.calls.play(user, Stream(microphone=AudioStream(MediaSource.EXTERNAL, "", mono48)))
-            await self.calls.record(user, RecordStream(True, mono48))
+            try:
+                await self.calls.record(user, RecordStream(True, mono48, camera=bool(TG["vision"]), screen=bool(TG["vision"])))
+            except Exception:
+                if not TG["vision"]:
+                    raise
+                log.exception("could not ask for the caller's video: carrying on with sound only")
+                await self.calls.record(user, RecordStream(True, mono48))
+            if TG["vision"]:
+                eyes = asyncio.create_task(line.watch())
             if user in self.chats:            # the chat hands the conversation over to the call
                 await self.chats.pop(user).close_text()
             log.info("call from %s answered in %d ms", user, int((time.time() - t0) * 1000))
@@ -541,6 +592,8 @@ class Phone:
             log.exception("call failed")
         finally:
             self.line = self.peer = None
+            if eyes:
+                eyes.cancel()
             try:
                 await self.calls.leave_call(user)
             except Exception:

@@ -3,3 +3,5 @@ telethon==1.45.0
 numpy
 onnxruntime==1.23.2
 transformers==5.20.2
+pyobjc-framework-Vision; sys_platform == "darwin"   # optional: "vision" in telegram.json
+pyobjc-framework-Quartz; sys_platform == "darwin"

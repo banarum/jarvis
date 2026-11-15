@@ -173,3 +173,15 @@ ends with a median/worst line in the log.
   (the `local` pipeline needs Apple Silicon; `gemini`/`speak` should run on Linux).
 - Outgoing calls (the assistant ringing you) and group voice chats.
 - Work chat images are downloadable by agents but not looked at by the voice model itself.
+
+## Vision
+
+With `"vision": true` the line asks for the caller's video as well as their sound. Every
+`vision_every_s` seconds it takes the latest picture (camera or shared screen), skips it if
+it looks like the previous one, and otherwise has Apple's Vision framework read it on this
+Mac: recognised text, scene labels, faces. The result is given to the brain with the
+caller's next phrase, and only when it differs from what was last told. Nothing leaves the
+machine, and an audio-only call costs nothing extra.
+
+Limits: Vision reads text and names scenes from a fixed list; it does not describe a picture
+in sentences. Tested with frames in the call library's format, not yet on a live video call.
