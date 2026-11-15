@@ -189,3 +189,12 @@ a few lines. Fixed the same night and tested offline with a scripted brain: empt
 are retried, hint echoes dropped, compaction folds the open chat session and keeps longer
 notes, repeats after a hand-off are not spoken. Still open: matching an unclear answer to
 the options just offered, and racing the backup brain earlier (2.5 s instead of 5 s).
+
+## 15 Nov, evening — vision
+
+Built at the user's request: stills from a video call read by Apple's on-device Vision
+(text, scene labels, faces), interval in the config, given to the brain with the caller's
+words. Offline: a frame in the call library's format was read in 0.3–0.7 s (2 s the first
+time) and the brain answered questions about the text on it; the same picture is told once.
+Unknown until a real video call: whether the library delivers the phone's video in a
+private call when we send none, and what full-rate raw video does to the process's load.

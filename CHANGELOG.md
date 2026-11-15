@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-15 — The line can see
+
+### Added
+- **Vision on video calls** (`"vision": true` in `telegram.json`, off by default). Every
+  `vision_every_s` seconds (4) a still is taken from the caller's camera or shared screen and,
+  if the picture changed, read on this Mac by Apple's Vision framework: the text in it, the
+  kind of scene, the number of faces. What it shows reaches the brain together with the
+  caller's next words, once per change. No cloud vision, no model download. It reads and
+  labels; it does not write descriptions. The last still is kept in `logs/vision-last.jpg`.
+  New file `vision.py`; needs `pyobjc-framework-Vision` (macOS only).
+
 ## 2026-11-15 — After the first day of calls and chat
 
 ### Fixed

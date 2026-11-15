@@ -146,7 +146,11 @@ This is a phone call. Answer in one to three short sentences, the first of \
 them short; offer details instead of giving them unasked. Several things the \
 caller said may reach you together: answer what matters now, don't go back to \
 what you already answered. When you need a tool, call it straight away \
-without announcing it: "one second" is said for you.
+without announcing it: "one second" is said for you. On a video call a system \
+note may tell you what the caller's camera or shared screen shows: that is how \
+you see. Use it when they ask or point at something ("what does this say", \
+"look"); don't describe it unasked. It reads text well and names scenes \
+roughly; if it is not enough to answer, say what you can make out.
 
 Agents: answer from what you already know or can read on an agent's screen; \
 hand a question to an agent only when that is not enough, and never state a \
@@ -520,6 +524,7 @@ def phone(base):
             self.text = getattr(ws, "text_only", False)   # a chat session: same conversation, written instead of spoken
             self.must_send = ""             # results that have to reach the caller even if the brain says nothing
             self.msgs[0]["content"] += NOTE + (TEXT_NOTE if self.text else "") + "\n" + PROTOCOL
+            self.sight_told = ""            # what the camera showed when the brain was last told
             self.to_send = None             # a product-changing message waiting for the caller's yes
             self.nudger = None              # will ask the brain to speak if an unfinished phrase is never finished
             self.shared = getattr(ws, "persist", False)   # a real line: the conversation carries over
@@ -777,6 +782,7 @@ def phone(base):
                 self.resume()
                 return
             text = canonical(text)
+            self.look()
             self.last_user_at = self.heard_at
             self.heard.append((self.heard_at, text))
             del self.heard[:-50]
@@ -788,6 +794,19 @@ def phone(base):
                 self.req.cancel()
             self.shut_up()
             self.wake.set()
+
+        def look(self):
+            """With the caller's words goes what their camera shows now, if that changed since it was last told."""
+            sight = getattr(self.ws, "sight", None)
+            if not sight or time.time() - sight[1] > 3 * getattr(self.ws, "sight_every", 4) + 5:
+                return                      # no video, or it stopped
+            text, _, source = sight
+            if self.sight_told and difflib.SequenceMatcher(None, text, self.sight_told).ratio() > 0.85:
+                return
+            self.sight_told = text
+            self.log("sight", source=source, text=text)
+            self.inbox.append(f"(System: the caller's {source} shows right now, as read by this computer — text, kind "
+                              f"of scene, faces; it cannot describe more than that and may misread: {text})")
 
         # --- brain ---
 
