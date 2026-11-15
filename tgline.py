@@ -133,12 +133,12 @@ class Line:
         self.fed_at = time.time()         # when the caller's audio last arrived
         self.deaf = False
         self.self_timed = False           # the call class times its own answers (phone.py)
-        self.frame = None                 # the latest picture from the caller: (source, I420 bytes, width, height, quarter turns, when)
+        self.still = None                 # the latest picture from the caller: (source, I420 bytes, width, height, quarter turns, when)
         self.sight = None                 # what it showed, in words: (text, when, source); phone.py tells the brain
         self.sight_every = float(TG["vision_every_s"])
 
     def picture(self, source, f):
-        self.frame = (source, f.frame, f.info.width, f.info.height, int(f.info.rotation) // 90 % 4, time.time())
+        self.still = (source, f.frame, f.info.width, f.info.height, int(f.info.rotation) // 90 % 4, time.time())
 
     async def watch(self):
         """Every few seconds: if the picture changed, read it (text, kind of scene, faces)."""
@@ -149,9 +149,9 @@ class Line:
         last, looked, announced = None, 0.0, False
         while not self.closed:
             await asyncio.sleep(max(1.0, self.sight_every))
-            if not self.frame or self.frame[5] <= looked:
+            if not self.still or self.still[5] <= looked:
                 continue
-            source, data, w, h, turns, looked = self.frame
+            source, data, w, h, turns, looked = self.still
             if not announced:
                 announced = True
                 log.info("video from the caller: %s, %dx%d", source, w, h)
